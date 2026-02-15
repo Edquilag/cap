@@ -29,6 +29,8 @@ SEARCH_BLOB_SQL = """
 BASE_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_zonal_values_query_order ON zonal_values (region, province, city_municipality, barangay, street_subdivision, id)",
     "CREATE INDEX IF NOT EXISTS ix_zonal_values_dataset_value ON zonal_values (dataset_version, zonal_value)",
+    "CREATE INDEX IF NOT EXISTS ix_zonal_values_scope_class_version ON zonal_values (province, city_municipality, barangay, property_class, dataset_version)",
+    "CREATE INDEX IF NOT EXISTS ix_zonal_values_street_subdivision_lower ON zonal_values ((lower(street_subdivision)))",
     f"CREATE INDEX IF NOT EXISTS ix_zonal_values_search_vector ON zonal_values USING GIN (to_tsvector('simple', {SEARCH_BLOB_SQL}))",
 ]
 

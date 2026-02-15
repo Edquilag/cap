@@ -5,7 +5,7 @@ CODEX SETUP GUIDE (for cloned repo on another machine)
 - Python 3.12+
 - Node.js 20+
 - npm 10+
-- Optional for production/performance: PostgreSQL 14+
+- Optional but recommended for scale: PostgreSQL 14+
 
 2) Clone
 - git clone https://github.com/Edquilag/cap.git
@@ -18,10 +18,13 @@ CODEX SETUP GUIDE (for cloned repo on another machine)
 - pip install -r requirements.txt
 - Copy-Item .env.example .env
 
-Default backend mode uses SQLite (easy local run).
+Default run mode uses SQLite (`backend/zonalhub.db`).
 
-To use PostgreSQL, set in backend/.env:
+To use PostgreSQL, set in `backend/.env`:
 DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/<db_name>
+
+Optional export cap tuning (default 50000):
+EXPORT_MAX_ROWS=50000
 
 Start backend:
 - uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -32,13 +35,13 @@ Start backend:
 - Copy-Item .env.example .env
 - npm run dev
 
-Frontend URL:
+Frontend:
 - http://localhost:5173
 
 Backend docs:
 - http://localhost:8000/docs
 
-Health check:
+Health:
 - http://localhost:8000/health
 
 5) Data operations
@@ -47,21 +50,28 @@ Health check:
   .venv\Scripts\activate
   python scripts\fetch_bir_zonal_files.py
 
-- Ingest workbook folder:
+- Ingest extracted workbooks:
   python scripts\ingest_from_folder.py --folder ..\data\raw\bir_zonal\extracted --dataset-version BIR-ZONAL-YYYY-MM-DD
 
-- Migrate existing SQLite data to PostgreSQL:
+- Migrate SQLite to PostgreSQL:
   python scripts\migrate_sqlite_to_postgres.py --batch-size 20000
 
-6) UI flow (current build)
-- Home: region dropdown + province cards
-- Province tab: city list + barangay cards
-- Zonal tab: table of zonal values for selected barangay
+6) Current UI flow and features
+- Home: searchable Region dropdown -> Province cards
+- Province page: city/municipality cards
+- Barangay page: barangay cards
+- Zonal page:
+  - street-priority search (`Exact` + catch-all fallback policy)
+  - DO/Year dataset switcher + optional comparison
+  - summary cards (min/median/max/count/class mix)
+  - precision badges (`Exact`, `Catch-all`, `Special case`)
+  - modal details with source transparency
+  - CSV/XLSX export
 
 7) Notes for Codex
-- Read README.md and docs/README.md first.
-- Do not commit .env files, local DB files, or raw downloaded data.
-- Keep changes ASCII unless file already requires unicode.
-- Run quick checks after edits:
-  backend API smoke (health + key endpoints)
-  frontend build (npm run build)
+- Read `README.md` then `docs/README.md`.
+- Keep `.env`, local DB files, raw downloaded data, and node_modules out of commits.
+- Run checks after edits:
+  - backend compile: `python -m compileall app` (inside `backend`)
+  - frontend build: `npm run build` (inside `frontend`)
+- If using PostgreSQL, restart backend after changing `DATABASE_URL`.

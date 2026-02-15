@@ -12,9 +12,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./zonalhub.db"
     default_page_size: int = 25
     max_page_size: int = 200
+    export_max_rows: int = 50000
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

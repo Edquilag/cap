@@ -2,148 +2,127 @@
 
 ## 1. Security Scope
 
-This document describes the security posture of the current ZonalHub implementation and a hardening roadmap for production deployment.
+This document covers the security posture of the current ZonalHub implementation and the hardening requirements for production.
 
 Current state:
-- internal/trusted-network oriented MVP
-- no authentication yet
-- no authorization layers yet
+- internal/trusted-network MVP
+- no auth/RBAC yet
+- read-heavy analytics and export endpoints exposed
 
 ## 2. Assets to Protect
 
 Primary assets:
-- Zonal data integrity (`zonal_values`)
-- Dataset lineage and provenance metadata
-- Database credentials and environment secrets
-- Service availability for B2B users
+- zonal value data integrity (`zonal_values`)
+- data lineage metadata (`source_file`, `source_sheet`, `source_row`, `dataset_version`)
+- database credentials and environment secrets
+- service availability and query responsiveness
 
 Secondary assets:
-- Downloaded BIR source files and manifests
-- Operational logs and deployment scripts
+- downloaded BIR source files
+- ingestion manifests and operational logs
 
 ## 3. Trust Boundaries
 
-- Browser client to API boundary
-- API service to database boundary
-- Ingestion scripts to external BIR endpoints boundary
-- Local/CI environment to production boundary
+- browser <-> API
+- API <-> database
+- ingestion scripts <-> external BIR endpoints
+- local/CI/CD <-> deployment infrastructure
 
 ## 4. Current Security Controls
 
-Implemented controls:
-- SQLAlchemy ORM parameterization (reduces SQL injection risk from query params)
-- FastAPI request parsing/validation for typed query inputs
-- Config via environment variables (`.env`)
-- CORS allowlist configurable through settings
-- Source lineage fields for record-level auditability
-
-Database controls (recommended deployment baseline):
-- dedicated DB user with least privilege
-- network restriction to API host(s)
+- SQLAlchemy parameterized queries (reduces injection risk)
+- FastAPI type validation for query parameters
+- environment-based configuration (`.env`)
+- configurable CORS allowlist
+- row-level source lineage retained for traceability
+- export safety cap (`export_max_rows`) to reduce abuse blast radius
 
 ## 5. Current Gaps
 
-High-priority gaps:
-- No authentication or session/token validation
-- No authorization or role-based access control
-- No API rate limiting or abuse controls
-- No audit trail for data read actions
-- No request correlation IDs and structured security logs
-- No automated secret rotation policy
+High-priority:
+- no authentication
+- no authorization/role model
+- no rate limiting
+- no request identity/correlation middleware
+- no audit logs for sensitive reads and export events
 
-Medium-priority gaps:
-- No WAF / reverse-proxy security headers baseline
-- No background malware scanning for downloaded attachments
-- No signed artifact/dependency verification workflow
+Medium-priority:
+- no reverse-proxy security header policy baseline
+- no malware scan for downloaded workbook attachments
+- no centralized secret-management integration
 
 ## 6. Threat Considerations
 
 ### A. Unauthorized data access
 
 Risk:
-- anyone with network/API access can read data endpoints.
+- any network client can access API and export endpoints.
 
 Mitigations:
-- add OAuth2/JWT or SSO
-- enforce RBAC by tenant/account/role
-- restrict API ingress with VPN/IP allowlist until auth is completed
+- add SSO/JWT auth
+- add RBAC (admin, analyst, partner)
+- isolate API ingress with VPN/IP allowlist until auth is complete
 
-### B. Credential leakage
+### B. API abuse / DoS
 
 Risk:
-- `.env` exposure or weak password management.
+- expensive search + export calls may be spammed.
 
 Mitigations:
-- move secrets to secret manager
-- rotate DB credentials periodically
-- avoid committing `.env` files
-- use separate credentials per environment
+- reverse-proxy rate limiting
+- endpoint timeout budgets
+- per-client quotas
+- monitored alerting on high-volume export usage
 
-### C. API abuse / denial of service
+### C. Credential leakage
 
 Risk:
-- expensive search requests can be spammed.
+- `.env` exposure or weak DB credentials.
 
 Mitigations:
-- reverse-proxy rate limits
-- request timeout budgets
-- per-client throttling
-- caching for common filter lookups
+- store secrets in managed secret vault
+- rotate DB credentials
+- enforce environment-specific credentials
+- keep `.env` excluded from VCS
 
-### D. Supply-chain and ingestion risks
+### D. Data integrity risks
 
 Risk:
-- downloaded files can be malformed or malicious.
+- malformed workbook content pollutes production dataset.
 
 Mitigations:
-- run downloads in isolated environment
-- enforce extension/type validation
-- add optional antivirus scan
-- keep parsers/dependencies patched
+- staged ingestion + validation gate
+- checksum/manifest tracking
+- dataset-version promotion workflow
 
-### E. Data integrity errors
+## 7. Export Endpoint Security Notes
 
-Risk:
-- malformed workbook data pollutes production tables.
+`GET /api/v1/zonal-values/export` considerations:
+- currently synchronous and unauthenticated (same as other endpoints)
+- returns full source metadata for auditability
+- row cap limit prevents unbounded extraction in one request
 
-Mitigations:
-- staging table + validation gate before promoting dataset version
-- row-level quality checks and anomaly thresholds
-- checksums/manifests for reproducibility
-
-## 7. Security Hardening Checklist
-
-### Immediate (before external exposure)
-
-- Add authentication and RBAC.
-- Put API behind TLS-terminating reverse proxy.
-- Restrict CORS to exact production origins.
-- Use non-superuser DB account with minimal privileges.
-- Enable DB backups and restore tests.
-- Configure access logs with request IDs.
-
-### Next phase
-
-- Add rate limiting.
-- Add centralized logging and SIEM integration.
-- Add dependency and container image scanning in CI.
-- Add vulnerability management and patch cadence.
-- Add security incident runbook and owner on-call rotation.
+Recommended controls before internet exposure:
+- auth + role checks
+- export audit logs (who/when/filters/row-count)
+- throttling and burst limits
+- optional async export job with signed temporary download URLs
 
 ## 8. Secure Configuration Guidance
 
-Environment variables:
-- `DATABASE_URL` must use strong password and non-default user.
-- `CORS_ORIGINS` must list only trusted frontend domains.
-- Keep `.env` out of source control and backups that are broadly accessible.
+Environment:
+- keep `DATABASE_URL` secret and environment-specific
+- restrict `cors_origins` to trusted frontends only
+- tune `export_max_rows` based on infrastructure capacity
 
-Network:
-- Do not expose PostgreSQL directly to the public internet.
-- Allow API ingress only from approved networks/load balancers.
+Database:
+- use non-superuser account for app access
+- block public DB exposure
+- enforce least-privilege network policies
 
-Platform:
-- Run API service as non-root user.
-- Keep OS and runtime patched.
+Runtime:
+- run app process as non-root user
+- patch OS/runtime dependencies regularly
 
 ## 9. Logging and Incident Readiness
 
@@ -151,19 +130,26 @@ Production logging should include:
 - timestamp
 - request ID
 - endpoint
-- response status
+- status code
 - latency
-- authenticated principal (when auth is implemented)
+- authenticated user identity (after auth implementation)
+- export truncation flags and requested format
 
-Minimum incident preparation:
-- backup restore verification schedule
-- documented escalation path
+Incident readiness minimum:
+- tested backup/restore schedule
+- clear escalation path
 - post-incident review template
 
-## 10. Compliance and Audit Notes
+## 10. Hardening Checklist
 
-The system stores public pricing references and lineage metadata, but organizations should still:
-- classify data formally
-- document retention periods
-- maintain change logs for ingestion and schema changes
-- retain evidence for dataset source and import date/version
+Immediate:
+- implement auth + RBAC
+- enforce TLS at ingress
+- apply rate limits
+- add structured logging + request IDs
+- add export audit and anomaly alerts
+
+Next phase:
+- SIEM integration
+- dependency/container scanning in CI
+- incident response playbooks and ownership model

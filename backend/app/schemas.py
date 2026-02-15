@@ -47,3 +47,18 @@ class FilterOptions(BaseModel):
 class LocationChildren(BaseModel):
     cities: list[str] = Field(default_factory=list)
     barangays: list[str] = Field(default_factory=list)
+
+
+class PropertyClassMixItem(BaseModel):
+    property_class: str
+    count: int
+
+
+class ZonalSummary(BaseModel):
+    total_records: int
+    min_value: Decimal | None
+    max_value: Decimal | None
+    median_value: Decimal | None
+    catch_all_records: int
+    exact_street_records: int
+    class_mix: list[PropertyClassMixItem] = Field(default_factory=list)

@@ -2,30 +2,31 @@
 
 ## 1. Purpose
 
-ZonalHub is a B2B real-estate data platform that converts fragmented BIR zonal-value spreadsheets into a searchable application.
+ZonalHub is a B2B real-estate data platform that transforms fragmented BIR zonal spreadsheets into an auditable and searchable web application.
 
-Primary objective:
-- Let users find zonal values quickly by location and property attributes without manually navigating workbook files and sheet structures.
+Primary value:
+- faster valuation lookup
+- lower operational friction versus raw spreadsheet browsing
+- source traceability for compliance and due diligence
 
-Core value delivered:
-- Faster due diligence
-- Unified data structure across many workbook layouts
-- Source traceability (`source_file`, `source_sheet`, `source_row`) for audit confidence
+## 2. Functional Scope
 
-## 2. Current Scope
-
-The current implementation provides:
-- FastAPI backend for read APIs
-- PostgreSQL or SQLite persistence (PostgreSQL recommended for production)
-- Data ingestion scripts for local workbook folders
-- BIR page fetch script that downloads official zonal attachments
-- React frontend with filtering, search, pagination, and detail panel
+Current implementation provides:
+- FastAPI backend with paginated query API
+- Data ingestion scripts for workbook folders and BIR download sources
+- Location cascade navigation (Region -> Province -> City/Municipality -> Barangay)
+- Zonal workspace features:
+  - street-priority matching with catch-all fallback policy
+  - dataset (DO/year) switching and summary comparison
+  - decision metrics (total, min, median, max, class mix)
+  - source transparency modal
+  - CSV/XLSX export with row cap safety control
 
 Out-of-scope (current version):
-- Authentication and role-based access control
-- Multi-tenant data isolation
-- Export jobs and async workflows
-- Geospatial map overlays
+- authentication and RBAC
+- tenant isolation
+- geospatial map overlays
+- background async export jobs
 
 ## 3. High-Level Architecture
 
@@ -37,94 +38,91 @@ Out-of-scope (current version):
                                    v
                     +-----------------------------+
                     | fetch_bir_zonal_files.py    |
-                    | - scrape template codes      |
-                    | - query BIR CMS API          |
-                    | - download attachments       |
-                    | - extract workbooks          |
+                    | - discover attachments       |
+                    | - download workbooks         |
+                    | - extract files              |
                     +--------------+--------------+
                                    |
                                    v
                     +-----------------------------+
                     | ingest_from_folder.py        |
                     | + app/services/ingestion.py  |
-                    | - parse workbook rows        |
-                    | - normalize fields           |
+                    | - normalize row fields       |
                     | - load zonal_values table    |
                     +--------------+--------------+
                                    |
                                    v
  +----------------------+   +----------------------+   +----------------------+
  | React Frontend       |-->| FastAPI API Layer    |-->| PostgreSQL / SQLite  |
- | - filters            |   | - routers            |   | - zonal_values table |
- | - table              |   | - CRUD query builder |   | - search indexes     |
- | - detail view        |   | - pagination         |   |                      |
+ | - location flow      |   | - routers            |   | - zonal_values table |
+ | - summary + table    |   | - CRUD query logic   |   | - search indexes     |
+ | - export + modal     |   | - export streaming   |   |                      |
  +----------------------+   +----------------------+   +----------------------+
 ```
 
-## 4. Backend Components
+## 4. Backend Modules
 
-- `backend/app/main.py`  
-  App bootstrap, CORS setup, health route, router registration, startup DB/table/index initialization.
+- `backend/app/main.py`
+  - app initialization, CORS, DB/table startup
+  - PostgreSQL optimization hook
 
-- `backend/app/config.py`  
-  Environment-driven settings (`DATABASE_URL`, page-size limits, CORS origins).
+- `backend/app/routers/zonal_values.py`
+  - list/search endpoint
+  - summary endpoint
+  - export endpoint
+  - location helper and record detail endpoints
 
-- `backend/app/models.py`  
-  SQLAlchemy model for `zonal_values`.
+- `backend/app/crud.py`
+  - filter condition builder
+  - street-priority ranking + catch-all fallback logic
+  - aggregate summary queries (including median)
+  - export query path
 
-- `backend/app/crud.py`  
-  Query logic for filtered search, record retrieval, and filter option extraction.
+- `backend/app/services/postgres_optimization.py`
+  - idempotent index creation for search and scope ranking
 
-- `backend/app/routers/zonal_values.py`  
-  API contract for list/details/filter endpoints.
+- `backend/app/services/ingestion.py`
+  - workbook parsing and normalization into canonical schema
 
-- `backend/app/services/ingestion.py`  
-  Workbook normalization and row-level extraction logic.
-
-- `backend/app/services/postgres_optimization.py`  
-  Idempotent PostgreSQL index and extension creation for search performance.
-
-## 5. Frontend Components
+## 5. Frontend Modules
 
 - `frontend/src/App.tsx`
-  - Search/filter form
-  - Paginated table
-  - Selected-record details panel
-  - API integration and client-side state management
+  - page-mode routing via query params
+  - region/province/city/barangay navigation
+  - zonal workspace controls, summary, table, modal, export actions
 
 - `frontend/src/App.css`, `frontend/src/index.css`
-  - UI styling and layout behavior
+  - responsive layout and design system styling
+
+- `frontend/src/data/phRegionProvinces.ts`
+  - static region -> province mapping used in initial location navigation
 
 ## 6. Data Model
 
 Primary table: `zonal_values`
 
-Core field groups:
-- Location hierarchy: `region`, `province`, `city_municipality`, `barangay`, `street_subdivision`
-- Classification: `property_class`, `property_type`
-- Pricing: `zonal_value`, `unit`
-- Versioning/traceability: `dataset_version`, `source_file`, `source_sheet`, `source_row`
-- Context: `rdo_code`, `effectivity_date`, `remarks`
-
-Design notes:
-- Some fields are modeled as `Text` because BIR spreadsheets contain long, non-standard strings.
-- Data lineage fields support source validation and audit workflows.
+Field groups:
+- location hierarchy: `region`, `province`, `city_municipality`, `barangay`, `street_subdivision`
+- classification: `property_class`, `property_type`
+- valuation: `zonal_value`, `unit`
+- traceability: `dataset_version`, `source_file`, `source_sheet`, `source_row`
+- context: `rdo_code`, `effectivity_date`, `remarks`
 
 ## 7. End-to-End Request Flow
 
-1. User submits filters/search in frontend.
-2. Frontend builds query string and calls `GET /api/v1/zonal-values`.
-3. Backend composes SQLAlchemy conditions in `crud.get_zonal_values`.
-4. Backend runs:
-   - count query for total matches
-   - paginated ordered query for current page
-5. API returns `items`, `total`, `page`, and `page_size`.
-6. Frontend renders table rows; selected row shows full detail + lineage.
+1. User selects location path to a target barangay.
+2. Frontend calls `GET /api/v1/zonal-values` with location + optional `street` and `dataset_version`.
+3. Backend applies:
+   - global search/structured filters
+   - street-priority ranking
+   - fallback policy for `ALL OTHER STREETS`
+4. Frontend fetches `GET /api/v1/zonal-values/summary` for decision metrics.
+5. User inspects record modal with source provenance fields.
+6. User can export the filtered result set via `GET /api/v1/zonal-values/export`.
 
-## 8. Design Principles Used
+## 8. Design Principles
 
-- Traceability first: every row stores source file/sheet/row metadata.
-- Lenient ingestion: parser handles inconsistent workbook formats with alias mapping and heuristics.
-- Query ergonomics: both global search and structured filters.
-- Production path: PostgreSQL optimization layer for large datasets.
-
+- Traceability-first: lineage fields are first-class in API and UI.
+- Preserve official ambiguity: catch-all rows are not auto-guessed into specific streets.
+- Decision-ready UX: summary metrics and precision indicators are shown before deep record inspection.
+- Performance-aware querying: indexes and query structure optimize read-heavy enterprise workflows.

@@ -1,23 +1,23 @@
 # Operations Runbook
 
-## 1. Environments
+## 1. Environment Model
 
-Recommended environment model:
-- `dev`: local developer machines
-- `staging`: pre-production validation
-- `prod`: production workload
+Recommended environments:
+- `dev`
+- `staging`
+- `prod`
 
 Each environment should have:
 - separate database
 - separate credentials
-- separate dataset-version process
+- controlled dataset-version workflow
 
 ## 2. Prerequisites
 
-- Python 3.12+ (or project-compatible runtime)
-- Node.js 20+ for frontend
+- Python 3.12+
+- Node.js 20+
+- npm 10+
 - PostgreSQL 14+ recommended for production
-- Windows PowerShell commands shown below (adapt for Linux/macOS as needed)
 
 ## 3. Backend Setup
 
@@ -30,8 +30,11 @@ Copy-Item .env.example .env
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Health check:
+Health:
 - `GET http://localhost:8000/health`
+
+API docs:
+- `http://localhost:8000/docs`
 
 ## 4. Frontend Setup
 
@@ -42,7 +45,7 @@ npm install
 npm run dev
 ```
 
-Local app URL:
+App URL:
 - `http://localhost:5173`
 
 ## 5. Data Operations
@@ -72,73 +75,75 @@ python scripts\ingest_from_folder.py --folder ..\data\raw\bir_zonal\extracted --
 python scripts\migrate_sqlite_to_postgres.py --batch-size 20000
 ```
 
-Post-migration validation:
-- compare source/target row counts
-- query sample records from API
+## 6. Runtime Smoke Checklist
 
-## 6. Deployment Workflow (Recommended)
+Verify these routes after deployment:
+- `GET /health`
+- `GET /api/v1/zonal-values/filters`
+- `GET /api/v1/zonal-values/location-children?province=<...>`
+- `GET /api/v1/zonal-values?province=<...>&city=<...>&barangay=<...>&page=1&page_size=25`
+- `GET /api/v1/zonal-values/summary?province=<...>&city=<...>&barangay=<...>`
+- `GET /api/v1/zonal-values/export?province=<...>&city=<...>&barangay=<...>&format=csv`
 
-1. Deploy backend API.
-2. Run DB schema initialization/startup.
-3. Apply migration/import for target dataset version.
-4. Verify health endpoint and smoke-test key API routes.
+## 7. Export Operations
+
+Export behavior:
+- synchronous response
+- capped by `export_max_rows` (default `50000`)
+- truncation metadata via response headers when matched rows exceed cap
+
+Operational guidance:
+- monitor response size and duration
+- track frequent high-volume export callers
+- lower `export_max_rows` if infrastructure is constrained
+
+## 8. Deployment Workflow
+
+1. Deploy backend.
+2. Ensure startup index optimization runs successfully.
+3. Ingest/promote target dataset version.
+4. Smoke-test key endpoints.
 5. Deploy frontend with correct `VITE_API_BASE_URL`.
-6. Validate end-to-end search/filter behavior.
+6. Validate location flow + zonal workspace + export.
 
-## 7. Backups and Recovery
+## 9. Backups and Recovery
 
 Recommended baseline:
-- daily logical backup (`pg_dump`)
-- periodic physical backups/snapshots
-- backup retention policy by environment criticality
+- daily `pg_dump`
+- periodic snapshot backups
+- environment-specific retention policy
 
-Recovery drill checklist:
-- restore backup to isolated environment
-- verify row counts and selected critical queries
-- document RTO/RPO achieved
+Recovery drill:
+1. restore into isolated environment
+2. validate row counts and sample API calls
+3. document achieved RTO/RPO
 
-## 8. Monitoring
+## 10. Troubleshooting
 
-Minimum production telemetry:
-- API request count/latency/error-rate
-- DB CPU, memory, connections, disk, slow queries
-- ingestion job success/failure metrics
-
-Recommended tools:
-- reverse proxy metrics + logs
-- PostgreSQL performance views (`pg_stat_activity`, `pg_stat_statements`)
-- centralized log aggregation
-
-## 9. Troubleshooting Guide
-
-### Symptom: API starts but search is slow
+### Symptom: street query returns unexpected rows
 
 Checks:
-- confirm PostgreSQL is used (`DATABASE_URL`)
-- confirm optimization indexes exist (`pg_indexes`)
-- run `ANALYZE zonal_values`
+- confirm `street` parameter is being passed
+- verify row is `ALL OTHER STREETS` fallback candidate
+- verify location/class/dataset scope in request
 
-### Symptom: Migration fails with column length errors
+### Symptom: export is truncated
 
 Cause:
-- model/schema mismatch against real source text lengths.
+- results exceed `export_max_rows`.
 
 Resolution:
-- update model types to support observed max lengths
-- recreate table and rerun migration
+- narrow filters or increase cap carefully in `backend/app/config.py`
 
-### Symptom: Empty filter dropdown options
+### Symptom: summary endpoint is slow
 
 Checks:
-- verify data ingestion inserted rows
-- confirm `GET /api/v1/zonal-values/filters` returns data
-- inspect DB for null-heavy columns
+- verify PostgreSQL usage
+- verify indexes from `docs/PERFORMANCE.md`
+- run `ANALYZE zonal_values`
 
-## 10. Change Management
+## 11. Change Management
 
-Recommended release discipline:
 - version dataset imports explicitly (`dataset_version`)
-- track schema changes with migration notes
-- keep deployment checklist in pull request template
-- require smoke test evidence before production rollout
-
+- document schema/API changes in release notes
+- require smoke-test evidence in pull requests

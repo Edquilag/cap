@@ -1,18 +1,22 @@
 # ZonalHub
 
-ZonalHub is a searchable web app for B2B real estate teams to browse BIR zonal values without opening Excel files.
+ZonalHub is a B2B real-estate web platform that converts BIR zonal-value spreadsheets into a fast, searchable, and auditable system.
 
-## What is built in this first version
+## What this build includes
 
 - FastAPI backend with normalized `zonal_values` table
 - Excel ingestion pipeline (`.xlsx`, `.xls`, `.xlsm`)
-- Filtered, paginated search API
-- PostgreSQL search optimization layer (full-text + trigram indexes)
-- React frontend with:
-  - searchable region dropdown
-  - province cards per selected region
-  - province page with city list and barangay cards
-  - zonal-value page per selected barangay with paginated records and detail panel
+- PostgreSQL optimization layer (full-text + trigram + scope indexes)
+- React frontend with guided location navigation:
+  - Region -> Province -> City/Municipality -> Barangay -> Zonal values
+- Enterprise-facing zonal workspace:
+  - Street-priority matching (`Exact` first, `ALL OTHER STREETS` fallback)
+  - Precision badges (`Exact`, `Catch-all`, `Special case`)
+  - Policy banner for catch-all behavior
+  - DO/Year dataset switcher + optional comparison summary
+  - Decision summary cards (total, min, median, max, class mix)
+  - Export buttons (CSV/XLSX) including source lineage fields
+  - Modal details with source transparency and "Why this appears" logic
 
 ## Tech stack
 
@@ -47,7 +51,7 @@ API docs:
 
 ## 2) Ingest Excel files
 
-Place BIR files in a folder, for example:
+Place BIR files in:
 
 ```text
 data/raw/
@@ -62,8 +66,6 @@ python scripts\ingest_from_folder.py --folder ..\data\raw --dataset-version RMC-
 ```
 
 ### Pull official BIR zonal files automatically
-
-This command pulls BIR zonal datasets from the official `https://www.bir.gov.ph/zonal-values` page, downloads linked files, and extracts workbook files into `data/raw/bir_zonal/extracted`.
 
 ```powershell
 cd backend
@@ -89,32 +91,43 @@ npm run dev
 Open:
 - `http://localhost:5173`
 
+## 4) Key API endpoints
+
+- `GET /api/v1/zonal-values`
+  - Supports pagination + location filters + dataset version + `street` priority matching
+- `GET /api/v1/zonal-values/summary`
+  - Returns decision metrics and class mix for current filters
+- `GET /api/v1/zonal-values/export`
+  - Exports filtered records in `csv` or `xlsx`
+- `GET /api/v1/zonal-values/filters`
+- `GET /api/v1/zonal-values/location-children`
+- `GET /api/v1/zonal-values/{id}`
+
 ## Documentation
 
 Full project documentation is in `docs/README.md`, including:
-- system architecture and logic
-- API reference
-- ingestion and data lineage behavior
-- performance optimization details
-- security model and hardening checklist
-- operations and deployment runbook
+- architecture and request flow
+- full API contract
+- street-priority matching and fallback logic
+- ingestion/data lineage model
+- performance and index strategy
+- security controls and hardening checklist
+- operations/deployment runbook
 
 Quick Codex/bootstrap guide:
 - `CODEX_SETUP_GUIDE.txt`
 
-## PostgreSQL connection (optional now, recommended for production)
+## PostgreSQL connection (recommended for production)
 
-No password is required to start development with SQLite.
-
-When you want to use your PostgreSQL database, update `backend/.env`:
+Update `backend/.env`:
 
 ```env
 DATABASE_URL=postgresql+psycopg://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:5432/YOUR_DB
 ```
 
-Then restart the backend and re-run ingestion.
+Then restart backend and re-run ingestion.
 
-If you already have data in SQLite (`backend/zonalhub.db`) and want to move it to PostgreSQL:
+If you already have data in SQLite (`backend/zonalhub.db`) and want to migrate to PostgreSQL:
 
 ```powershell
 cd backend
@@ -122,9 +135,7 @@ cd backend
 python scripts\migrate_sqlite_to_postgres.py --batch-size 20000
 ```
 
-## Next build steps
+## Notes
 
-- Add auth + roles (admin, analyst, partner)
-- Add saved searches and export jobs
-- Add dataset version management and diff reports
-- Add map view with geocoding and polygon overlays
+- `ALL OTHER STREETS` is treated as official catch-all source data, not inferred street mapping.
+- Export endpoint enforces a safety row cap (`export_max_rows`, default `50000`) and returns truncation headers when applicable.

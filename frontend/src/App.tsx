@@ -45,6 +45,21 @@ type LocationChildren = {
   barangays: string[];
 };
 
+type PropertyClassMixItem = {
+  property_class: string;
+  count: number;
+};
+
+type ZonalSummary = {
+  total_records: number;
+  min_value: string | number | null;
+  max_value: string | number | null;
+  median_value: string | number | null;
+  catch_all_records: number;
+  exact_street_records: number;
+  class_mix: PropertyClassMixItem[];
+};
+
 type RegionOption = {
   sourceCode: string;
   regionName: string;
@@ -58,12 +73,67 @@ type ProvinceCard = {
   queryName: string;
 };
 
-type PageView = 'home' | 'province' | 'zonal';
+type PageView = 'home' | 'province' | 'barangay' | 'zonal';
+type PrecisionBadge = 'Exact' | 'Catch-all' | 'Special case';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') ?? 'http://localhost:8000/api/v1';
 
 function normalizeName(value: string): string {
   return value.replace(/[^a-zA-Z0-9]+/g, ' ').trim().toUpperCase();
+}
+
+function normalizeStreet(value: string | null | undefined): string {
+  return (value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function isCatchAllStreet(street: string | null | undefined): boolean {
+  return /all\s+other\s+street/i.test(street ?? '');
+}
+
+function isSpecialCaseRow(record: ZonalValue): boolean {
+  const notes = `${record.street_subdivision ?? ''} ${record.remarks ?? ''}`.toUpperCase();
+  return /\*{1,4}/.test(notes) || notes.includes('OCULAR') || notes.includes('NOT EXISTING');
+}
+
+function getPrecisionBadge(record: ZonalValue): PrecisionBadge {
+  if (isCatchAllStreet(record.street_subdivision)) {
+    return 'Catch-all';
+  }
+  if (isSpecialCaseRow(record)) {
+    return 'Special case';
+  }
+  return 'Exact';
+}
+
+function getWhyThisAppears(record: ZonalValue, streetQuery: string): string {
+  const normalizedQuery = normalizeStreet(streetQuery);
+  const normalizedStreet = normalizeStreet(record.street_subdivision);
+  const catchAll = isCatchAllStreet(record.street_subdivision);
+
+  if (normalizedQuery) {
+    if (normalizedStreet === normalizedQuery && !catchAll) {
+      return 'This row is ranked first because the street/subdivision exactly matches your street query.';
+    }
+    if (normalizedStreet.includes(normalizedQuery) && !catchAll) {
+      return 'This row is included because the street/subdivision contains your street query and is prioritized over catch-all rows.';
+    }
+    if (catchAll) {
+      return 'This catch-all row appears only as fallback when no named street row matches your query in the same barangay, property class, and dataset version.';
+    }
+  }
+
+  if (catchAll) {
+    return 'This is an official catch-all entry from source files. Use it when no specific named street applies.';
+  }
+
+  if (isSpecialCaseRow(record)) {
+    return 'This row includes source footnote markers or special remarks (for example ocular/placeholder notes).';
+  }
+
+  return 'This row matches your selected location and dataset filters.';
 }
 
 function formatAmount(value: string | number | null): string {
@@ -75,6 +145,14 @@ function formatAmount(value: string | number | null): string {
     return String(value);
   }
   return `PHP ${numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function toNumber(value: string | number | null): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function cleanLocationLabel(value: string): string {
@@ -96,13 +174,16 @@ function getPageViewFromUrl(): PageView {
   if (viewParam === 'province') {
     return 'province';
   }
+  if (viewParam === 'barangay') {
+    return 'barangay';
+  }
   if (viewParam === 'zonal') {
     return 'zonal';
   }
   return 'home';
 }
 
-function openNewTab(params: Record<string, string>) {
+function navigateToPage(params: Record<string, string>) {
   const url = new URL(window.location.href);
   url.search = '';
   for (const [key, value] of Object.entries(params)) {
@@ -110,7 +191,46 @@ function openNewTab(params: Record<string, string>) {
       url.searchParams.set(key, value);
     }
   }
-  window.open(url.toString(), '_blank', 'noopener,noreferrer');
+  window.location.assign(url.toString());
+}
+
+function buildZonalQuery(params: {
+  province: string;
+  city: string;
+  barangay: string;
+  page?: number;
+  pageSize?: number;
+  datasetVersion?: string;
+  street?: string;
+}): URLSearchParams {
+  const query = new URLSearchParams({
+    province: params.province,
+    city: params.city,
+    barangay: params.barangay,
+  });
+  if (params.page !== undefined) {
+    query.set('page', String(params.page));
+  }
+  if (params.pageSize !== undefined) {
+    query.set('page_size', String(params.pageSize));
+  }
+  const trimmedDataset = params.datasetVersion?.trim() ?? '';
+  if (trimmedDataset) {
+    query.set('dataset_version', trimmedDataset);
+  }
+  const trimmedStreet = params.street?.trim() ?? '';
+  if (trimmedStreet) {
+    query.set('street', trimmedStreet);
+  }
+  return query;
+}
+
+function getFilenameFromDisposition(disposition: string | null, fallback: string): string {
+  if (!disposition) {
+    return fallback;
+  }
+  const match = disposition.match(/filename="?([^"]+)"?/i);
+  return match?.[1] ?? fallback;
 }
 
 function App() {
@@ -138,7 +258,6 @@ function App() {
   const [cityLoading, setCityLoading] = useState(false);
   const [barangayLoading, setBarangayLoading] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
-  const [selectedCity, setSelectedCity] = useState('');
 
   const [results, setResults] = useState<PaginatedResult>({
     items: [],
@@ -151,6 +270,18 @@ function App() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [selectedRecord, setSelectedRecord] = useState<ZonalValue | null>(null);
+
+  const [streetInput, setStreetInput] = useState(searchParams.get('street') ?? '');
+  const [streetQuery, setStreetQuery] = useState(searchParams.get('street') ?? '');
+  const [selectedDatasetVersion, setSelectedDatasetVersion] = useState(searchParams.get('dataset_version') ?? '');
+  const [compareDatasetVersion, setCompareDatasetVersion] = useState(searchParams.get('compare_dataset_version') ?? '');
+
+  const [summary, setSummary] = useState<ZonalSummary | null>(null);
+  const [compareSummary, setCompareSummary] = useState<ZonalSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [exportingFormat, setExportingFormat] = useState<'csv' | 'xlsx' | null>(null);
+  const [exportInfo, setExportInfo] = useState<string | null>(null);
 
   const provinceFromUrl = searchParams.get('province') ?? '';
   const regionFromUrl = searchParams.get('region') ?? '';
@@ -267,6 +398,11 @@ function App() {
     return [];
   }, [selectedRegion, normalizedDatasetProvinces]);
 
+  const datasetVersionOptions = useMemo(
+    () => [...filterOptions.dataset_versions].sort((a, b) => b.localeCompare(a)),
+    [filterOptions.dataset_versions]
+  );
+
   useEffect(() => {
     if (pageView !== 'province' || !provinceFromUrl) {
       return;
@@ -299,7 +435,7 @@ function App() {
   }, [pageView, provinceFromUrl]);
 
   useEffect(() => {
-    if (pageView !== 'province' || !provinceFromUrl || !selectedCity) {
+    if (pageView !== 'barangay' || !provinceFromUrl || !cityFromUrl) {
       setBarangays([]);
       return;
     }
@@ -310,7 +446,7 @@ function App() {
 
     const query = new URLSearchParams({
       province: provinceFromUrl,
-      city: selectedCity,
+      city: cityFromUrl,
       limit: '5000',
     });
     fetch(`${API_BASE_URL}/zonal-values/location-children?${query.toString()}`, { signal: controller.signal })
@@ -331,7 +467,7 @@ function App() {
       .finally(() => setBarangayLoading(false));
 
     return () => controller.abort();
-  }, [pageView, provinceFromUrl, selectedCity]);
+  }, [cityFromUrl, pageView, provinceFromUrl]);
 
   useEffect(() => {
     if (pageView !== 'zonal' || !provinceFromUrl || !cityFromUrl || !barangayFromUrl) {
@@ -342,12 +478,14 @@ function App() {
     setRecordsLoading(true);
     setRecordsError(null);
 
-    const query = new URLSearchParams({
+    const query = buildZonalQuery({
       province: provinceFromUrl,
       city: cityFromUrl,
       barangay: barangayFromUrl,
-      page: String(page),
-      page_size: String(pageSize),
+      page,
+      pageSize,
+      datasetVersion: selectedDatasetVersion,
+      street: streetQuery,
     });
 
     fetch(`${API_BASE_URL}/zonal-values?${query.toString()}`, { signal: controller.signal })
@@ -374,9 +512,138 @@ function App() {
       .finally(() => setRecordsLoading(false));
 
     return () => controller.abort();
-  }, [barangayFromUrl, cityFromUrl, page, pageSize, pageView, provinceFromUrl]);
+  }, [barangayFromUrl, cityFromUrl, page, pageSize, pageView, provinceFromUrl, selectedDatasetVersion, streetQuery]);
+
+  useEffect(() => {
+    if (pageView !== 'zonal' || !provinceFromUrl || !cityFromUrl || !barangayFromUrl) {
+      setSummary(null);
+      setCompareSummary(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    setSummaryLoading(true);
+    setSummaryError(null);
+
+    const baseSummaryQuery = buildZonalQuery({
+      province: provinceFromUrl,
+      city: cityFromUrl,
+      barangay: barangayFromUrl,
+      datasetVersion: selectedDatasetVersion,
+      street: streetQuery,
+    });
+
+    const activeSummaryRequest = fetch(`${API_BASE_URL}/zonal-values/summary?${baseSummaryQuery.toString()}`, {
+      signal: controller.signal,
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`Summary request failed (${response.status})`);
+      }
+      return (await response.json()) as ZonalSummary;
+    });
+
+    const compareRequest =
+      compareDatasetVersion && compareDatasetVersion !== selectedDatasetVersion
+        ? fetch(
+            `${API_BASE_URL}/zonal-values/summary?${buildZonalQuery({
+              province: provinceFromUrl,
+              city: cityFromUrl,
+              barangay: barangayFromUrl,
+              datasetVersion: compareDatasetVersion,
+              street: streetQuery,
+            }).toString()}`,
+            { signal: controller.signal }
+          ).then(async (response) => {
+            if (!response.ok) {
+              throw new Error(`Comparison request failed (${response.status})`);
+            }
+            return (await response.json()) as ZonalSummary;
+          })
+        : Promise.resolve<ZonalSummary | null>(null);
+
+    Promise.all([activeSummaryRequest, compareRequest])
+      .then(([activeSummary, comparePayload]) => {
+        setSummary(activeSummary);
+        setCompareSummary(comparePayload);
+      })
+      .catch((fetchError: Error) => {
+        if (fetchError.name !== 'AbortError') {
+          setSummaryError(fetchError.message);
+        }
+      })
+      .finally(() => setSummaryLoading(false));
+
+    return () => controller.abort();
+  }, [
+    barangayFromUrl,
+    cityFromUrl,
+    compareDatasetVersion,
+    pageView,
+    provinceFromUrl,
+    selectedDatasetVersion,
+    streetQuery,
+  ]);
+
+  useEffect(() => {
+    if (pageView !== 'zonal') {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (selectedDatasetVersion.trim()) {
+      url.searchParams.set('dataset_version', selectedDatasetVersion.trim());
+    } else {
+      url.searchParams.delete('dataset_version');
+    }
+    if (streetQuery.trim()) {
+      url.searchParams.set('street', streetQuery.trim());
+    } else {
+      url.searchParams.delete('street');
+    }
+    if (compareDatasetVersion.trim()) {
+      url.searchParams.set('compare_dataset_version', compareDatasetVersion.trim());
+    } else {
+      url.searchParams.delete('compare_dataset_version');
+    }
+    window.history.replaceState({}, '', url.toString());
+  }, [compareDatasetVersion, pageView, selectedDatasetVersion, streetQuery]);
+
+  useEffect(() => {
+    if (!selectedRecord) {
+      return;
+    }
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSelectedRecord(null);
+      }
+    };
+    window.addEventListener('keydown', onEscape);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [selectedRecord]);
+
+  useEffect(() => {
+    if (!selectedRecord) {
+      return;
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [selectedRecord]);
 
   const pageCount = useMemo(() => Math.max(1, Math.ceil(results.total / pageSize)), [results.total, pageSize]);
+
+  const summaryMedianDelta = useMemo(() => {
+    if (!summary || !compareSummary) {
+      return null;
+    }
+    const currentMedian = toNumber(summary.median_value);
+    const previousMedian = toNumber(compareSummary.median_value);
+    if (currentMedian === null || previousMedian === null) {
+      return null;
+    }
+    return currentMedian - previousMedian;
+  }, [compareSummary, summary]);
 
   const confirmRegion = () => {
     const normalizedInput = regionInput.trim().toLowerCase();
@@ -395,8 +662,8 @@ function App() {
     setFiltersError(null);
   };
 
-  const openProvinceTab = (regionLabel: string, province: ProvinceCard) => {
-    openNewTab({
+  const openProvincePage = (regionLabel: string, province: ProvinceCard) => {
+    navigateToPage({
       view: 'province',
       region: regionLabel,
       province: province.queryName,
@@ -404,18 +671,110 @@ function App() {
     });
   };
 
-  const openZonalTab = (barangay: string) => {
-    if (!provinceFromUrl || !selectedCity) {
+  const openBarangayPage = (city: string) => {
+    if (!provinceFromUrl) {
       return;
     }
-    openNewTab({
+    navigateToPage({
+      view: 'barangay',
+      region: regionFromUrl,
+      province: provinceFromUrl,
+      province_label: provinceLabelFromUrl,
+      city,
+    });
+  };
+
+  const openZonalPage = (barangay: string) => {
+    if (!provinceFromUrl || !cityFromUrl) {
+      return;
+    }
+    navigateToPage({
       view: 'zonal',
       region: regionFromUrl,
       province: provinceFromUrl,
       province_label: provinceLabelFromUrl,
-      city: selectedCity,
+      city: cityFromUrl,
       barangay,
     });
+  };
+
+  const applyStreetFilter = () => {
+    setStreetQuery(streetInput.trim());
+    setPage(1);
+  };
+
+  const clearStreetFilter = () => {
+    setStreetInput('');
+    setStreetQuery('');
+    setPage(1);
+  };
+
+  const handleDatasetChange = (datasetVersion: string) => {
+    setSelectedDatasetVersion(datasetVersion);
+    if (compareDatasetVersion === datasetVersion) {
+      setCompareDatasetVersion('');
+    }
+    setPage(1);
+  };
+
+  const handleCompareChange = (datasetVersion: string) => {
+    if (datasetVersion === selectedDatasetVersion) {
+      setCompareDatasetVersion('');
+      return;
+    }
+    setCompareDatasetVersion(datasetVersion);
+  };
+
+  const exportRecords = async (format: 'csv' | 'xlsx') => {
+    if (!provinceFromUrl || !cityFromUrl || !barangayFromUrl) {
+      return;
+    }
+    try {
+      setExportingFormat(format);
+      setExportInfo(null);
+
+      const query = buildZonalQuery({
+        province: provinceFromUrl,
+        city: cityFromUrl,
+        barangay: barangayFromUrl,
+        datasetVersion: selectedDatasetVersion,
+        street: streetQuery,
+      });
+      query.set('format', format);
+
+      const response = await fetch(`${API_BASE_URL}/zonal-values/export?${query.toString()}`);
+      if (!response.ok) {
+        throw new Error(`Export request failed (${response.status})`);
+      }
+
+      const blob = await response.blob();
+      const fallbackName = `zonal_values_export.${format}`;
+      const filename = getFilenameFromDisposition(response.headers.get('content-disposition'), fallbackName);
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+
+      if (response.headers.get('x-export-truncated') === 'true') {
+        const rowLimit = response.headers.get('x-export-row-limit') ?? '50000';
+        const totalMatches = response.headers.get('x-export-total-matches') ?? 'unknown';
+        setExportInfo(`Export completed with limit: ${rowLimit} rows downloaded out of ${totalMatches} matches.`);
+      } else {
+        setExportInfo(`Export completed: ${filename}`);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        setExportInfo(error.message);
+      } else {
+        setExportInfo('Export failed.');
+      }
+    } finally {
+      setExportingFormat(null);
+    }
   };
 
   if (pageView === 'province') {
@@ -425,56 +784,68 @@ function App() {
           <div className="topbar__content">
             <p className="topbar__eyebrow">Province Explorer</p>
             <h1>{provinceLabelFromUrl || 'Province'}</h1>
-            <p className="topbar__subtitle">{regionFromUrl ? `Region: ${regionFromUrl}` : 'Select city then barangay.'}</p>
+            <p className="topbar__subtitle">{regionFromUrl ? `Region: ${regionFromUrl}` : 'Select a city/municipality.'}</p>
           </div>
         </header>
 
         <main className="workspace">
           {locationError && <p className="error-banner">{locationError}</p>}
 
-          <section className="panel split-panel">
-            <div className="split-panel__column">
-              <h2>City / Municipality</h2>
-              <p>Click a city to load barangay cards.</p>
-              {cityLoading ? (
-                <p className="hint">Loading cities...</p>
-              ) : cities.length === 0 ? (
-                <p className="hint">No city records found for this province.</p>
-              ) : (
-                <div className="card-grid">
-                  {cities.map((city) => (
-                    <button
-                      key={city}
-                      type="button"
-                      className={`entity-card ${selectedCity === city ? 'entity-card--active' : ''}`}
-                      onClick={() => setSelectedCity(city)}
-                    >
-                      {cleanLocationLabel(city)}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+          <section className="panel province-panel">
+            <h2>City / Municipality</h2>
+            <p>Click a city/municipality to move to its barangay page.</p>
+            {cityLoading ? (
+              <p className="hint">Loading cities...</p>
+            ) : cities.length === 0 ? (
+              <p className="hint">No city records found for this province.</p>
+            ) : (
+              <div className="card-grid">
+                {cities.map((city) => (
+                  <button key={city} type="button" className="entity-card" onClick={() => openBarangayPage(city)}>
+                    {cleanLocationLabel(city)}
+                    <small>Open barangay list</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        </main>
+      </div>
+    );
+  }
 
-            <div className="split-panel__column">
-              <h2>Barangay Cards</h2>
-              <p>Click a barangay card to open the zonal value page in a new tab.</p>
-              {!selectedCity ? (
-                <p className="hint">Select a city first.</p>
-              ) : barangayLoading ? (
-                <p className="hint">Loading barangays...</p>
-              ) : barangays.length === 0 ? (
-                <p className="hint">No barangay records found for {cleanLocationLabel(selectedCity)}.</p>
-              ) : (
-                <div className="card-grid">
-                  {barangays.map((barangay) => (
-                    <button key={barangay} type="button" className="entity-card" onClick={() => openZonalTab(barangay)}>
-                      {cleanLocationLabel(barangay)}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+  if (pageView === 'barangay') {
+    return (
+      <div className="app-shell">
+        <header className="topbar">
+          <div className="topbar__content">
+            <p className="topbar__eyebrow">Barangay Explorer</p>
+            <h1>{cleanLocationLabel(cityFromUrl || 'City/Municipality')}</h1>
+            <p className="topbar__subtitle">
+              {cleanLocationLabel(provinceLabelFromUrl)} / {cleanLocationLabel(cityFromUrl)}
+            </p>
+          </div>
+        </header>
+
+        <main className="workspace">
+          {locationError && <p className="error-banner">{locationError}</p>}
+          <section className="panel province-panel">
+            <h2>Barangay Cards</h2>
+            <p>Click a barangay card to open its zonal values page.</p>
+            {barangayLoading ? (
+              <p className="hint">Loading barangays...</p>
+            ) : barangays.length === 0 ? (
+              <p className="hint">No barangay records found for {cleanLocationLabel(cityFromUrl)}.</p>
+            ) : (
+              <div className="card-grid">
+                {barangays.map((barangay) => (
+                  <button key={barangay} type="button" className="entity-card" onClick={() => openZonalPage(barangay)}>
+                    {cleanLocationLabel(barangay)}
+                    <small>Open zonal values</small>
+                  </button>
+                ))}
+              </div>
+            )}
           </section>
         </main>
       </div>
@@ -495,62 +866,205 @@ function App() {
         </header>
 
         <main className="workspace">
-          {recordsError && <p className="error-banner">{recordsError}</p>}
+          <section className="panel zonal-controls">
+            <div className="zonal-controls__grid">
+              <label className="field-group field-group--street">
+                Street/Subdivision
+                <div className="field-group__inline">
+                  <input
+                    value={streetInput}
+                    onChange={(event) => setStreetInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        applyStreetFilter();
+                      }
+                    }}
+                    placeholder="Type a street for exact or partial match"
+                  />
+                  <button type="button" className="button button--primary" onClick={applyStreetFilter}>
+                    Apply
+                  </button>
+                  <button type="button" className="button button--secondary" onClick={clearStreetFilter}>
+                    Clear
+                  </button>
+                </div>
+              </label>
+
+              <label className="field-group">
+                Dataset Version (DO/Year)
+                <select value={selectedDatasetVersion} onChange={(event) => handleDatasetChange(event.target.value)}>
+                  <option value="">All dataset versions</option>
+                  {datasetVersionOptions.map((datasetVersion) => (
+                    <option key={datasetVersion} value={datasetVersion}>
+                      {datasetVersion}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field-group">
+                Compare Against
+                <select value={compareDatasetVersion} onChange={(event) => handleCompareChange(event.target.value)}>
+                  <option value="">No comparison</option>
+                  {datasetVersionOptions
+                    .filter((datasetVersion) => datasetVersion !== selectedDatasetVersion)
+                    .map((datasetVersion) => (
+                      <option key={datasetVersion} value={datasetVersion}>
+                        {datasetVersion}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
+
+            <p className="policy-banner">
+              Policy: <strong>ALL OTHER STREETS</strong> rows are shown only as fallback when no named street row matches your
+              street query within the same barangay, property class, and dataset version.
+            </p>
+          </section>
+
+          <section className="panel summary-panel">
+            <div className="summary-panel__header">
+              <h2>Decision Summary</h2>
+              <p>{summaryLoading ? 'Loading metrics...' : `Scope: ${selectedDatasetVersion || 'All dataset versions'}`}</p>
+            </div>
+
+            {summaryError && <p className="error-banner">{summaryError}</p>}
+
+            <div className="summary-cards">
+              <article className="metric-card">
+                <span>Total Records</span>
+                <strong>{summary?.total_records?.toLocaleString() ?? '-'}</strong>
+              </article>
+              <article className="metric-card">
+                <span>Min Value</span>
+                <strong>{formatAmount(summary?.min_value ?? null)}</strong>
+              </article>
+              <article className="metric-card">
+                <span>Median Value</span>
+                <strong>{formatAmount(summary?.median_value ?? null)}</strong>
+              </article>
+              <article className="metric-card">
+                <span>Max Value</span>
+                <strong>{formatAmount(summary?.max_value ?? null)}</strong>
+              </article>
+              <article className="metric-card">
+                <span>Catch-all Rows</span>
+                <strong>{summary?.catch_all_records?.toLocaleString() ?? '-'}</strong>
+              </article>
+            </div>
+
+            {compareSummary && (
+              <p className="comparison-text">
+                Comparison ({compareDatasetVersion}): median delta is{' '}
+                <strong>{summaryMedianDelta === null ? 'N/A' : formatAmount(summaryMedianDelta)}</strong>
+              </p>
+            )}
+
+            <div className="class-mix">
+              {(summary?.class_mix ?? []).map((entry) => (
+                <span key={entry.property_class} className="class-chip">
+                  {entry.property_class}: {entry.count.toLocaleString()}
+                </span>
+              ))}
+              {(summary?.class_mix ?? []).length === 0 && !summaryLoading && <span className="hint">No class mix data.</span>}
+            </div>
+          </section>
 
           <section className="panel records-panel">
             <div className="records-header">
               <div>
                 <h2>Zonal Value Records</h2>
-                <p>{recordsLoading ? 'Loading...' : `${results.total.toLocaleString()} records`}</p>
+                <p>
+                  {recordsLoading ? 'Loading records...' : `${results.total.toLocaleString()} records`}
+                  {streetQuery.trim() ? ` | Street query: "${streetQuery.trim()}"` : ''}
+                </p>
               </div>
-              <label className="compact-input">
-                Rows
-                <select
-                  value={pageSize}
-                  onChange={(event) => {
-                    setPageSize(Number(event.target.value));
-                    setPage(1);
-                  }}
+              <div className="records-header__actions">
+                <label className="compact-input">
+                  Rows
+                  <select
+                    value={pageSize}
+                    onChange={(event) => {
+                      setPageSize(Number(event.target.value));
+                      setPage(1);
+                    }}
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </label>
+
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={() => exportRecords('csv')}
+                  disabled={Boolean(exportingFormat)}
                 >
-                  <option value={25}>25</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                </select>
-              </label>
+                  {exportingFormat === 'csv' ? 'Exporting...' : 'Export CSV'}
+                </button>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={() => exportRecords('xlsx')}
+                  disabled={Boolean(exportingFormat)}
+                >
+                  {exportingFormat === 'xlsx' ? 'Exporting...' : 'Export XLSX'}
+                </button>
+              </div>
             </div>
+
+            {recordsError && <p className="error-banner">{recordsError}</p>}
+            {exportInfo && <p className="hint export-hint">{exportInfo}</p>}
 
             <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
                     <th>Street/Subdivision</th>
+                    <th>Precision</th>
                     <th>Class</th>
                     <th>Type</th>
                     <th>Zonal Value</th>
+                    <th>DO/Version</th>
                     <th>RDO</th>
                   </tr>
                 </thead>
                 <tbody>
                   {results.items.length === 0 && !recordsLoading ? (
                     <tr>
-                      <td colSpan={5} className="empty-cell">
+                      <td colSpan={7} className="empty-cell">
                         No zonal values found.
                       </td>
                     </tr>
                   ) : (
-                    results.items.map((row) => (
-                      <tr
-                        key={row.id}
-                        onClick={() => setSelectedRecord(row)}
-                        className={selectedRecord?.id === row.id ? 'is-active' : ''}
-                      >
-                        <td>{row.street_subdivision ?? '-'}</td>
-                        <td>{row.property_class ?? '-'}</td>
-                        <td>{row.property_type ?? '-'}</td>
-                        <td>{formatAmount(row.zonal_value)}</td>
-                        <td>{row.rdo_code ?? '-'}</td>
-                      </tr>
-                    ))
+                    results.items.map((row) => {
+                      const badge = getPrecisionBadge(row);
+                      return (
+                        <tr key={row.id} className={selectedRecord?.id === row.id ? 'is-active' : ''}>
+                          <td>
+                            <button type="button" className="street-link" onClick={() => setSelectedRecord(row)}>
+                              {row.street_subdivision ?? '-'}
+                            </button>
+                          </td>
+                          <td>
+                            <span
+                              className={`precision-badge precision-badge--${badge
+                                .toLowerCase()
+                                .replace(/\s+/g, '-')}`}
+                            >
+                              {badge}
+                            </span>
+                          </td>
+                          <td>{row.property_class ?? '-'}</td>
+                          <td>{row.property_type ?? '-'}</td>
+                          <td>{formatAmount(row.zonal_value)}</td>
+                          <td>{row.dataset_version}</td>
+                          <td>{row.rdo_code ?? '-'}</td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -576,37 +1090,96 @@ function App() {
               </button>
             </div>
           </section>
-
-          <section className="panel details-panel">
-            <h2>Details</h2>
-            {selectedRecord ? (
-              <dl className="detail-grid">
-                <dt>Region</dt>
-                <dd>{selectedRecord.region ?? '-'}</dd>
-                <dt>Province</dt>
-                <dd>{selectedRecord.province ?? '-'}</dd>
-                <dt>City/Municipality</dt>
-                <dd>{selectedRecord.city_municipality ?? '-'}</dd>
-                <dt>Barangay</dt>
-                <dd>{selectedRecord.barangay ?? '-'}</dd>
-                <dt>Street/Subdivision</dt>
-                <dd>{selectedRecord.street_subdivision ?? '-'}</dd>
-                <dt>Zonal Value</dt>
-                <dd>{formatAmount(selectedRecord.zonal_value)}</dd>
-                <dt>Unit</dt>
-                <dd>{selectedRecord.unit ?? '-'}</dd>
-                <dt>Source</dt>
-                <dd>
-                  {selectedRecord.source_file} | {selectedRecord.source_sheet} | row {selectedRecord.source_row ?? '-'}
-                </dd>
-                <dt>Remarks</dt>
-                <dd>{selectedRecord.remarks ?? '-'}</dd>
-              </dl>
-            ) : (
-              <p className="hint">Select a row to inspect full record details.</p>
-            )}
-          </section>
         </main>
+
+        {selectedRecord && (
+          <div className="modal-backdrop" role="presentation" onClick={() => setSelectedRecord(null)}>
+            <section
+              className="record-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Zonal value details"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="record-modal__header">
+                <div>
+                  <p className="topbar__eyebrow">Record Details</p>
+                  <h2>{selectedRecord.street_subdivision ?? '-'}</h2>
+                </div>
+                <button type="button" className="button button--secondary" onClick={() => setSelectedRecord(null)}>
+                  Close
+                </button>
+              </div>
+
+              <section className="detail-section">
+                <h3>Interpretation</h3>
+                <p>{getWhyThisAppears(selectedRecord, streetQuery)}</p>
+                <p>
+                  Precision:{' '}
+                  <span
+                    className={`precision-badge precision-badge--${getPrecisionBadge(selectedRecord)
+                      .toLowerCase()
+                      .replace(/\s+/g, '-')}`}
+                  >
+                    {getPrecisionBadge(selectedRecord)}
+                  </span>
+                </p>
+              </section>
+
+              <section className="detail-section">
+                <h3>Location and Value</h3>
+                <dl className="detail-grid">
+                  <dt>Region</dt>
+                  <dd>{selectedRecord.region ?? '-'}</dd>
+                  <dt>Province</dt>
+                  <dd>{selectedRecord.province ?? '-'}</dd>
+                  <dt>City/Municipality</dt>
+                  <dd>{selectedRecord.city_municipality ?? '-'}</dd>
+                  <dt>Barangay</dt>
+                  <dd>{selectedRecord.barangay ?? '-'}</dd>
+                  <dt>Street/Subdivision</dt>
+                  <dd>{selectedRecord.street_subdivision ?? '-'}</dd>
+                  <dt>Property Class</dt>
+                  <dd>{selectedRecord.property_class ?? '-'}</dd>
+                  <dt>Property Type</dt>
+                  <dd>{selectedRecord.property_type ?? '-'}</dd>
+                  <dt>Zonal Value</dt>
+                  <dd>{formatAmount(selectedRecord.zonal_value)}</dd>
+                  <dt>Unit</dt>
+                  <dd>{selectedRecord.unit ?? '-'}</dd>
+                  <dt>Remarks</dt>
+                  <dd>{selectedRecord.remarks ?? '-'}</dd>
+                </dl>
+              </section>
+
+              <section className="detail-section">
+                <h3>Source Transparency</h3>
+                <dl className="detail-grid">
+                  <dt>Dataset Version</dt>
+                  <dd>{selectedRecord.dataset_version}</dd>
+                  <dt>RDO</dt>
+                  <dd>{selectedRecord.rdo_code ?? '-'}</dd>
+                  <dt>Effectivity Date</dt>
+                  <dd>{selectedRecord.effectivity_date ?? '-'}</dd>
+                  <dt>Source File</dt>
+                  <dd>{selectedRecord.source_file}</dd>
+                  <dt>Source Sheet</dt>
+                  <dd>{selectedRecord.source_sheet}</dd>
+                  <dt>Source Row</dt>
+                  <dd>{selectedRecord.source_row ?? '-'}</dd>
+                  <dt>Ingested At</dt>
+                  <dd>{selectedRecord.created_at}</dd>
+                </dl>
+              </section>
+
+              <div className="record-modal__actions">
+                <button type="button" className="button button--secondary" onClick={() => setSelectedRecord(null)}>
+                  Close
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
       </div>
     );
   }
@@ -658,7 +1231,7 @@ function App() {
 
         <section className="panel province-panel">
           <h2>2. Province Cards</h2>
-          <p>Click a province to open the next page in a new tab.</p>
+          <p>Click a province to open its city/municipality page.</p>
 
           {!selectedRegion ? (
             <p className="hint">No region confirmed yet.</p>
@@ -671,10 +1244,10 @@ function App() {
                   key={`${province.officialName}|${province.queryName}`}
                   type="button"
                   className="entity-card"
-                  onClick={() => openProvinceTab(selectedRegion.label, province)}
+                  onClick={() => openProvincePage(selectedRegion.label, province)}
                 >
                   <span>{province.officialName}</span>
-                  <small>Open city/barangay view</small>
+                  <small>Open city/barangay page</small>
                 </button>
               ))}
             </div>

@@ -1,90 +1,94 @@
-# Performance and Search Optimization
+# Performance and Query Optimization
 
-## 1. Performance Profile
+## 1. Performance Goals
 
-Dataset scale in current environment:
-- ~1.83 million rows in `zonal_values`
+Primary goals for this system:
+- responsive interactive search for large zonal datasets
+- stable pagination order for deterministic UX
+- efficient street-priority filtering and comparison summaries
+- safe export behavior for large result sets
 
-Performance goals:
-- maintain acceptable search latency for interactive UI
-- preserve stable pagination ordering
-- keep filtering responsive under mixed query patterns
-
-## 2. PostgreSQL Optimization Layer
+## 2. Optimization Layer
 
 Module:
 - `backend/app/services/postgres_optimization.py`
 
 Applied at:
 - API startup (`backend/app/main.py`)
-- SQLite to PostgreSQL migration completion (`backend/scripts/migrate_sqlite_to_postgres.py`)
+- post-migration path (`backend/scripts/migrate_sqlite_to_postgres.py`)
 
-The optimization layer is idempotent (`CREATE ... IF NOT EXISTS`).
+All statements are idempotent (`CREATE ... IF NOT EXISTS`).
 
 ## 3. Index Strategy
 
-### Baseline B-tree indexes
+### Baseline (from SQLAlchemy model)
 
-Created from SQLAlchemy model `index=True` declarations, including:
+Indexes exist on frequently filtered columns:
 - location fields
 - classification fields
 - `dataset_version`
 - `zonal_value`
 - source lineage fields
 
-### Additional query-planning indexes
+### Additional explicit indexes
 
-- `ix_zonal_values_query_order`  
-  `(region, province, city_municipality, barangay, street_subdivision, id)`  
-  Optimizes ordered pagination path.
+- `ix_zonal_values_query_order`
+  - `(region, province, city_municipality, barangay, street_subdivision, id)`
+  - helps ordered pagination path
 
-- `ix_zonal_values_dataset_value`  
-  `(dataset_version, zonal_value)`  
-  Supports version+value filtered workloads.
+- `ix_zonal_values_dataset_value`
+  - `(dataset_version, zonal_value)`
+  - helps dataset-version + numeric range workloads
 
-### Trigram and full-text indexes
+- `ix_zonal_values_scope_class_version`
+  - `(province, city_municipality, barangay, property_class, dataset_version)`
+  - supports street fallback scope checks
 
-Required extension:
-- `pg_trgm`
+- `ix_zonal_values_street_subdivision_lower`
+  - expression index on `lower(street_subdivision)`
+  - supports normalized street matching
 
-Implementation note:
-- If `pg_trgm` cannot be created due DB privilege restrictions, the API still runs with baseline and full-text indexes; only trigram indexes are skipped.
+### Full-text and trigram indexes
 
-Search indexes:
-- `ix_zonal_values_rdo_code_trgm`
-- `ix_zonal_values_region_trgm`
-- `ix_zonal_values_province_trgm`
-- `ix_zonal_values_city_municipality_trgm`
-- `ix_zonal_values_barangay_trgm`
-- `ix_zonal_values_street_subdivision_trgm`
-- `ix_zonal_values_property_class_trgm`
-- `ix_zonal_values_property_type_trgm`
-- `ix_zonal_values_search_blob_trgm` (combined document expression)
-- `ix_zonal_values_search_vector` (`to_tsvector('simple', ...)`)
+- `ix_zonal_values_search_vector` (GIN)
+- trigram GIN indexes on key text columns and combined search blob
+- requires `pg_trgm` extension (created when allowed)
 
-## 4. Search Query Behavior
+## 4. Street-Priority Query Cost Controls
 
-For PostgreSQL global `search`:
-- Full-text match:
-  - `to_tsvector('simple', search_blob) @@ websearch_to_tsquery('simple', :q)`
-- Trigram fallback:
-  - `search_blob ILIKE '%:q%'`
+Street matching introduces scoped fallback checks (`EXISTS` correlation) to enforce:
+- exact/contains named street rows first
+- `ALL OTHER STREETS` fallback only when no named match exists in scope
 
-This dual strategy covers:
-- token-based search
-- substring-style search
-- mixed short/long user input
+Performance impact mitigation:
+- scope composite index (`ix_zonal_values_scope_class_version`)
+- normalized street expression index
+- strong location filters (province/city/barangay) in UI workflow
 
-SQLite fallback path:
-- column-by-column `ILIKE` OR matching (no Postgres-specific operators)
+## 5. Summary Endpoint Performance
 
-## 5. Why This Works
+`GET /summary` computes:
+- count, min, max
+- median
+- catch-all count
+- top property-class mix
 
-- GIN full-text index handles lexical token search efficiently.
-- GIN trigram index improves `%...%` substring matching.
-- Dedicated order index reduces sort overhead on paginated listing.
+Median implementation:
+- PostgreSQL: `percentile_cont(0.5)` in SQL
+- SQLite: ordered midpoint retrieval strategy
 
-## 6. Verification Commands
+For production-scale workloads, PostgreSQL is strongly recommended.
+
+## 6. Export Performance and Safety
+
+`GET /export` is synchronous and optimized for operational safety:
+- hard export cap via `export_max_rows` (default `50000`)
+- truncation headers expose actual match count vs exported rows
+- avoids unbounded memory pressure from very large exports
+
+## 7. Validation and Monitoring
+
+### Useful checks
 
 List indexes:
 ```sql
@@ -95,25 +99,25 @@ WHERE schemaname = 'public'
 ORDER BY indexname;
 ```
 
-Inspect query plans:
+Inspect a street-filter plan:
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)
-SELECT count(*)
+SELECT *
 FROM zonal_values
-WHERE to_tsvector('simple', ...) @@ websearch_to_tsquery('simple', 'quezon')
-   OR (...) ILIKE '%quezon%';
+WHERE province ILIKE '%AGUSAN%'
+  AND city_municipality ILIKE '%BUTUAN%'
+  AND barangay ILIKE '%DOONGAN%';
 ```
 
-## 7. Tuning Checklist
+### Operational recommendations
 
-- Run `ANALYZE zonal_values;` after large imports.
-- Run `VACUUM (ANALYZE)` during maintenance windows when needed.
-- Tune `work_mem` and `shared_buffers` according to server capacity.
-- Monitor slow query logs and `pg_stat_statements`.
-- Reindex if index bloat becomes significant.
+- run `ANALYZE zonal_values` after large ingestion
+- monitor slow query logs and `pg_stat_statements`
+- tune `work_mem` and `shared_buffers` to server capacity
+- schedule vacuum/analyze during maintenance windows
 
-## 8. Known Tradeoffs
+## 8. Tradeoffs
 
-- More indexes improve reads but increase write/import overhead.
-- Combined search expression indexes consume additional disk space.
-- High-frequency updates are not currently the primary workload, so read optimization is prioritized.
+- More indexes increase read speed but add ingestion/write overhead.
+- Full-text + trigram strategy increases disk footprint.
+- Synchronous export keeps architecture simple but requires row caps for protection.
