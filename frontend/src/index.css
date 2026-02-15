@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  --ink: #17283a;
+  --subtle: #52697f;
+  --line: #d2deea;
+  --panel: #ffffff;
+  --panel-soft: #ebf3fb;
+  --brand: #166a73;
+  --accent: #d6924a;
+  font-family: 'IBM Plex Sans', 'Segoe UI', 'Trebuchet MS', sans-serif;
+  line-height: 1.45;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(900px 320px at 0% 0%, #e8eef8 0%, transparent 70%),
+    radial-gradient(900px 420px at 100% 8%, #f5efe4 0%, transparent 72%),
+    linear-gradient(180deg, #f4f8fc 0%, #edf3fa 100%);
+}

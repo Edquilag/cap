@@ -1,0 +1,67 @@
+CODEX SETUP GUIDE (for cloned repo on another machine)
+======================================================
+
+1) Prerequisites
+- Python 3.12+
+- Node.js 20+
+- npm 10+
+- Optional for production/performance: PostgreSQL 14+
+
+2) Clone
+- git clone https://github.com/Edquilag/cap.git
+- cd cap
+
+3) Backend setup (Terminal 1)
+- cd backend
+- python -m venv .venv
+- .venv\Scripts\activate
+- pip install -r requirements.txt
+- Copy-Item .env.example .env
+
+Default backend mode uses SQLite (easy local run).
+
+To use PostgreSQL, set in backend/.env:
+DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/<db_name>
+
+Start backend:
+- uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+4) Frontend setup (Terminal 2)
+- cd frontend
+- npm install
+- Copy-Item .env.example .env
+- npm run dev
+
+Frontend URL:
+- http://localhost:5173
+
+Backend docs:
+- http://localhost:8000/docs
+
+Health check:
+- http://localhost:8000/health
+
+5) Data operations
+- Fetch official BIR files:
+  cd backend
+  .venv\Scripts\activate
+  python scripts\fetch_bir_zonal_files.py
+
+- Ingest workbook folder:
+  python scripts\ingest_from_folder.py --folder ..\data\raw\bir_zonal\extracted --dataset-version BIR-ZONAL-YYYY-MM-DD
+
+- Migrate existing SQLite data to PostgreSQL:
+  python scripts\migrate_sqlite_to_postgres.py --batch-size 20000
+
+6) UI flow (current build)
+- Home: region dropdown + province cards
+- Province tab: city list + barangay cards
+- Zonal tab: table of zonal values for selected barangay
+
+7) Notes for Codex
+- Read README.md and docs/README.md first.
+- Do not commit .env files, local DB files, or raw downloaded data.
+- Keep changes ASCII unless file already requires unicode.
+- Run quick checks after edits:
+  backend API smoke (health + key endpoints)
+  frontend build (npm run build)

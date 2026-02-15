@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.venv_local/
+venv/
+
+# SQLite
+*.db
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+
+# Environment files
+.env
+backend/.env
+frontend/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Downloaded/raw data artifacts
+data/raw/
